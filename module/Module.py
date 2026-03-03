@@ -2,6 +2,7 @@
 # pylint: disable=E0102
 
 import sys
+import math
 from pathlib import Path
 from scipy.stats import ks_2samp, chi2
 
@@ -57,7 +58,6 @@ class Bubble:
 def process(
         df_bucket, 
         df_box,
-        bubble_thickness,
         filename
         ):
     order_list = df_bucket['order_code'].unique()
@@ -83,10 +83,18 @@ class Valuation:
             bubble_thickness: float = 1.0,
             bubble_filling_rate: float = 0.5,
             objective_function_1_baseline: float = 1000000.0,  # baseline cost for normalization
-            objective_function_2_baseline: float = 0.1  # baseline utilization deviation for normalization
+            objective_function_2_baseline: float = 0.1,  # baseline utilization deviation for normalization,
+            objective_function_3_baseline: float = 0.05,
+            objective_function_1_by_region_baseline: dict = None,  # optional baseline by region for objective function 1
+            objective_function_2_by_region_baseline: dict = None,  # optional baseline by region for objective function 2
+            objective_function_3_by_region_baseline: dict = None
     ) -> None:
         self.objective_function_1_baseline = objective_function_1_baseline
         self.objective_function_2_baseline = objective_function_2_baseline
+        self.objective_function_3_baseline = objective_function_3_baseline
+        self.objective_function_1_by_region_baseline = objective_function_1_by_region_baseline if objective_function_1_by_region_baseline is not None else {}
+        self.objective_function_2_by_region_baseline = objective_function_2_by_region_baseline if objective_function_2_by_region_baseline is not None else {}
+        self.objective_function_3_by_region_baseline = objective_function_3_by_region_baseline if objective_function_3_by_region_baseline is not None else {}
 
         df_box = collection.df_boxes
         
@@ -133,18 +141,25 @@ class Valuation:
         # Calculate valuation metrics — f1/f2 only over fittable orders, count unfittable separately
         objective_function_1 = 0
         objective_function_2 = 0
-        n_fittable = 0
-        n_unfittable = 0
+        objective_function_3 = 0
+        objective_function_1_by_region = {}
+        objective_function_2_by_region = {}
+        objective_function_3_by_region = {}
+        orders_by_region = {}  # total orders per region (for correct per-region averaging)
 
         for order in unique_orders:
             df_order_temp = data_order_mod[data_order_mod['order_code'] == order]
             item_volume = (df_order_temp['length'] * df_order_temp['width'] * df_order_temp['height'] * df_order_temp['unit']).sum()
+            region = (df_order_temp['volume_bin'].iloc[0], df_order_temp['length_bin'].iloc[0], df_order_temp['unit_bin'].iloc[0])  # region definition based on stratification bins
+
+            orders_by_region[region] = orders_by_region.get(region, 0) + 1
 
             df_result_temp = df_result[df_result['order'] == order]
 
             # Check if order is unfittable (no result row, or box_final is a known unfittable marker)
             if len(df_result_temp) == 0 or df_result_temp['box_final'].iloc[0] in unfittable_markers:
-                n_unfittable += 1
+                objective_function_3 += 1
+                objective_function_3_by_region[region] = objective_function_3_by_region.get(region, 0) + 1
                 continue
 
             # Fittable order — look up the chosen box by name
@@ -153,7 +168,8 @@ class Valuation:
 
             if len(df_box_temp) == 0:
                 # box name not found in collection (shouldn't happen, but guard against it)
-                n_unfittable += 1
+                objective_function_3 += 1
+                objective_function_3_by_region[region] = objective_function_3_by_region.get(region, 0) + 1
                 continue
 
             chosen_box_volume = df_box_temp['volume'].iloc[0]
@@ -164,36 +180,60 @@ class Valuation:
 
             # Objective function 1: minimize total cost (box cost + bubble cost)
             objective_function_1 += chosen_box_cost + bubble_usage.bubble_cost
+            objective_function_1_by_region[region] = objective_function_1_by_region.get(region, 0) + chosen_box_cost + bubble_usage.bubble_cost
             # Objective function 2: optimize total utilization (item volume / box volume)
             objective_function_2 += (item_volume / chosen_box_volume - utilization_optimal)**2
-            n_fittable += 1
+            objective_function_2_by_region[region] = objective_function_2_by_region.get(region, 0) + (item_volume / chosen_box_volume - utilization_optimal)**2
+            # Objective function 3: unfittable ratio, already counted above as objective_function_3 (count of unfittable orders)
 
         # Average over fittable orders only (avoid division by zero)
-        self.objective_function_1 = objective_function_1 / n_fittable if n_fittable > 0 else float('inf')
-        self.objective_function_2 = objective_function_2 / n_fittable if n_fittable > 0 else float('inf')
-
+        self.objective_function_1 = objective_function_1 / (len(unique_orders) - objective_function_3) if (len(unique_orders) - objective_function_3) > 0 else float('inf')
+        self.objective_function_2 = objective_function_2 / (len(unique_orders) - objective_function_3) if (len(unique_orders) - objective_function_3) > 0 else float('inf')
         # Unfittable ratio: measures Collection complexity/sparsity
-        self.r_unfittable = n_unfittable / len(unique_orders)
-        self.n_fittable = n_fittable
-        self.n_unfittable = n_unfittable
+        self.objective_function_3 = objective_function_3 / len(unique_orders)
 
-    def results(self, w1: float = 0.6, w2: float = 0.35, w3: float = 0.05):
-        """Combined objective function with unfittable penalty.
+        # Average by_region metrics using per-region order counts
+        self.objective_function_1_by_region = {}
+        self.objective_function_2_by_region = {}
+        self.objective_function_3_by_region = {}
+        self.orders_by_region = orders_by_region
+
+        for region, n_total in orders_by_region.items():
+            n_unfittable = objective_function_3_by_region.get(region, 0)
+            n_fittable = n_total - n_unfittable
+            self.objective_function_1_by_region[region] = objective_function_1_by_region.get(region, 0) / n_fittable if n_fittable > 0 else float('inf')
+            self.objective_function_2_by_region[region] = objective_function_2_by_region.get(region, 0) / n_fittable if n_fittable > 0 else float('inf')
+            self.objective_function_3_by_region[region] = n_unfittable / n_total
+
+    def results(self, w1: float = 0.6, w2: float = 0.35, w3: float = 0.05, k: float = 3.0):
+        """Combined objective function with exponential unfittable penalty.
         
-        F = w1 * (f1/b1) + w2 * (f2/b2) + w3 * r_unfittable
+        F = w1 * (f1/b1) + w2 * (f2/b2) + w3 * g(f3)
+        where g(f3) = exp(k * (f3/b3 - 1)) - 1
         
         - w1 + w2 + w3 = 1.0 (w1=0.6 cost, w2=0.35 utilization, w3=0.05 unfittable penalty)
         - f1/f2 are computed only over fittable orders (clean separation)
-        - r_unfittable is naturally in [0, 1], no baseline needed
-        - w3 reflects that unfittable orders are expected but indicate Collection complexity/sparsity
+        - g(f3) is centered at b3: neutral when f3=b3, harsh penalty when f3>>b3, reward when f3<<b3
+        - k controls sensitivity (k=1 mild, k=3-5 aggressive)
         """
+        g_f3 = math.exp(k * (self.objective_function_3 / self.objective_function_3_baseline - 1)) - 1
         return (w1 * (self.objective_function_1 / self.objective_function_1_baseline) 
                 + w2 * (self.objective_function_2 / self.objective_function_2_baseline) 
-                + w3 * self.r_unfittable)
+                + w3 * g_f3)
 
-    def results_by_region(self, number_of_regions: int):
-        # This function can be implemented to calculate the valuation metrics by region if needed
-        
+    def results_by_region(self, w1: float = 0.6, w2: float = 0.35, w3: float = 0.05, k: float = 3.0):
+        # Calculate combined fitness per region using exponential penalty for f3
+        results_by_region = {}
+        for region in self.orders_by_region.keys():
+            f1 = self.objective_function_1_by_region.get(region, float('inf'))
+            f2 = self.objective_function_2_by_region.get(region, float('inf'))
+            f3 = self.objective_function_3_by_region.get(region, 1.0)  # default to worst case if region missing
+            b3 = self.objective_function_3_by_region_baseline.get(region, self.objective_function_3_baseline)
+            g_f3 = math.exp(k * (f3 / b3 - 1)) - 1 if b3 > 0 else (0.0 if f3 == 0 else float('inf'))
+            results_by_region[region] = (w1 * (f1 / self.objective_function_1_baseline) 
+                                        + w2 * (f2 / self.objective_function_2_baseline) 
+                                        + w3 * g_f3)
+
 
 class Sample:
     ''' This class is used to create a small sample from the whole dataset for testing purposes via stratified sampling, to speed up the development process.
@@ -241,6 +281,11 @@ class Sample:
         sampled_order_codes = sampled_orders['order_code'].unique()
         self.sample = temp_data_order[temp_data_order['order_code'].isin(sampled_order_codes)].copy()
         self.data_order = temp_data_order
+
+        # Merge bin columns into data so Valuation can use them for region-based metrics
+        bin_cols = order_summary[['order_code', 'volume_bin', 'length_bin', 'unit_bin']]
+        self.sample = self.sample.merge(bin_cols, on='order_code', how='left')
+        self.data_order = self.data_order.merge(bin_cols, on='order_code', how='left')
     
     def ks_test(self, p_value_threshold: float = 0.05, ks_stat_threshold: float = 0.1):
         # Perform KS test between the sample and the whole dataset for key aspects
@@ -265,7 +310,7 @@ class Sample:
 
         print(f"Valuation results for sample: {valuation_sample.results(w1, w2, w3)}")
         print(f"Valuation results for full dataset: {valuation_full.results(w1, w2, w3)}")
-        print(f"Unfittable ratio — sample: {valuation_sample.r_unfittable:.4f}, full: {valuation_full.r_unfittable:.4f}")
+        print(f"Unfittable ratio — sample: {valuation_sample.objective_function_3:.4f}, full: {valuation_full.objective_function_3:.4f}")
 
         # return "Passed" if the valuation results are within 10% of each other, otherwise return "Failed"
         if abs(valuation_sample.results(w1, w2, w3) - valuation_full.results(w1, w2, w3)) / valuation_full.results(w1, w2, w3) < tolerance:
