@@ -3,6 +3,8 @@
 
 import sys
 import math
+import random
+import os
 from pathlib import Path
 from scipy.stats import ks_2samp, chi2
 
@@ -146,6 +148,7 @@ class Valuation:
         objective_function_2_by_region = {}
         objective_function_3_by_region = {}
         orders_by_region = {}  # total orders per region (for correct per-region averaging)
+        box_usage_by_region = {}  # box usage per region for region-based GA: {region: {box_name: count}}
 
         for order in unique_orders:
             df_order_temp = data_order_mod[data_order_mod['order_code'] == order]
@@ -184,6 +187,10 @@ class Valuation:
             # Objective function 2: optimize total utilization (item volume / box volume)
             objective_function_2 += (item_volume / chosen_box_volume - utilization_optimal)**2
             objective_function_2_by_region[region] = objective_function_2_by_region.get(region, 0) + (item_volume / chosen_box_volume - utilization_optimal)**2
+            # Track box usage per region for region-based GA
+            if region not in box_usage_by_region:
+                box_usage_by_region[region] = {}
+            box_usage_by_region[region][chosen_box_name] = box_usage_by_region[region].get(chosen_box_name, 0) + 1
             # Objective function 3: unfittable ratio, already counted above as objective_function_3 (count of unfittable orders)
 
         # Average over fittable orders only (avoid division by zero)
@@ -197,6 +204,7 @@ class Valuation:
         self.objective_function_2_by_region = {}
         self.objective_function_3_by_region = {}
         self.orders_by_region = orders_by_region
+        self.box_usage_by_region = box_usage_by_region
 
         for region, n_total in orders_by_region.items():
             n_unfittable = objective_function_3_by_region.get(region, 0)
@@ -233,6 +241,7 @@ class Valuation:
             results_by_region[region] = (w1 * (f1 / self.objective_function_1_baseline) 
                                         + w2 * (f2 / self.objective_function_2_baseline) 
                                         + w3 * g_f3)
+        return results_by_region
 
 
 class Sample:
@@ -321,16 +330,321 @@ class Sample:
 class GeneticAlgorithm:
     def __init__(
             self,
-            valuation: Valuation,
+            data_order: pd.DataFrame,
+            number_of_boxes: int,
+            number_of_buckets: int = 5,
             population_size: int = 50,
             generations: int = 100,
-            mutation_rate: float = 0.01
+            mutation_rate: float = 0.1,
+            crossover_rate: float = 0.8,
+            tournament_size: int = 3,
+            elitism_count: int = 2,
+            immigrant_count: int = 3,
+            region_tournament_size: int = 20,
+            region_tournament_rounds: int = 3,
+            top_boxes_per_region: int = 3,
+            pool_ratio: float = 0.5,
+            dim_min: int = 5,
+            dim_max: int = 60,
+            mutation_sigma: float = 3.0,
+            valuation_kwargs: dict = None,  # extra kwargs for Valuation (baselines, thicknesses, etc.)
+            results_kwargs: dict = None,    # extra kwargs for results() (w1, w2, w3, k)
+            filename: str = 'ga_temp_result.csv'
     ) -> None:
-        self.valuation = valuation
+        self.data_order = data_order
+        self.number_of_boxes = number_of_boxes
+        self.number_of_buckets = number_of_buckets
         self.population_size = population_size
         self.generations = generations
         self.mutation_rate = mutation_rate
+        self.crossover_rate = crossover_rate
+        self.tournament_size = tournament_size
+        self.elitism_count = elitism_count
+        self.immigrant_count = immigrant_count
+        self.region_tournament_size = region_tournament_size
+        self.region_tournament_rounds = region_tournament_rounds
+        self.top_boxes_per_region = top_boxes_per_region
+        self.pool_ratio = pool_ratio
+        self.dim_min = dim_min
+        self.dim_max = dim_max
+        self.mutation_sigma = mutation_sigma
+        self.valuation_kwargs = valuation_kwargs or {}
+        self.results_kwargs = results_kwargs or {}
+        self.filename = filename
+
+    def _random_individual(self):
+        """Generate random box dimensions: list of [L, W, H], sorted by volume."""
+        boxes = []
+        for _ in range(self.number_of_boxes):
+            dims = sorted([random.randint(self.dim_min, self.dim_max) for _ in range(3)], reverse=True)
+            boxes.append(dims)
+        # Sort boxes by volume (ascending) for consistency
+        boxes.sort(key=lambda b: b[0] * b[1] * b[2])
+        return boxes
+
+    def _evaluate(self, individual):
+        """Evaluate fitness of an individual (lower is better)."""
+        # Remove stale CSV so results don't bleed across evaluations
+        if os.path.exists(self.filename):
+            os.remove(self.filename)
+        collection = Collection(self.number_of_boxes, individual)
+        valuation = Valuation(
+            data_order=self.data_order,
+            number_of_buckets=self.number_of_buckets,
+            collection=collection,
+            filename=self.filename,
+            **self.valuation_kwargs
+        )
+        return (
+            valuation.results(**self.results_kwargs),
+            valuation.results_by_region(**self.results_kwargs),
+            valuation.box_usage_by_region
+        )
+
+    def _tournament_select(self, population, fitnesses):
+        """Select one individual via tournament selection (lower fitness wins)."""
+        indices = random.sample(range(len(population)), self.tournament_size)
+        best_idx = min(indices, key=lambda i: fitnesses[i])
+        return copy.deepcopy(population[best_idx])
+
+    def _crossover(self, parent1, parent2):
+        """Single-point crossover: swap boxes after a random cut point."""
+        if random.random() > self.crossover_rate:
+            return copy.deepcopy(parent1), copy.deepcopy(parent2)
+
+        point = random.randint(1, self.number_of_boxes - 1)
+        child1 = copy.deepcopy(parent1[:point]) + copy.deepcopy(parent2[point:])
+        child2 = copy.deepcopy(parent2[:point]) + copy.deepcopy(parent1[point:])
+
+        # Re-sort by volume for consistency
+        child1.sort(key=lambda b: b[0] * b[1] * b[2])
+        child2.sort(key=lambda b: b[0] * b[1] * b[2])
+        return child1, child2
+
+    def _mutate(self, individual):
+        """Gaussian mutation: perturb random dimensions, clamp to bounds, keep L >= W >= H."""
+        mutated = copy.deepcopy(individual)
+        for i in range(len(mutated)):
+            for j in range(3):
+                if random.random() < self.mutation_rate:
+                    mutated[i][j] = int(round(mutated[i][j] + random.gauss(0, self.mutation_sigma)))
+                    mutated[i][j] = max(self.dim_min, min(self.dim_max, mutated[i][j]))
+            # Keep L >= W >= H within each box
+            mutated[i] = sorted(mutated[i], reverse=True)
+        # Re-sort boxes by volume (ascending)
+        mutated.sort(key=lambda b: b[0] * b[1] * b[2])
+        return mutated
+
+    def _region_tournament_select(self, region_fitnesses, region):
+        """Tournament selection for a specific region (lower fitness wins).
+
+        Args:
+            region_fitnesses: list of dicts, one per individual, {region: fitness_value}
+            region: the region key to select on
+        Returns:
+            Index of the winning individual.
+        """
+        indices = random.sample(range(len(region_fitnesses)), min(self.region_tournament_size, len(region_fitnesses)))
+        best_idx = min(indices, key=lambda i: region_fitnesses[i].get(region, float('inf')))
+        return best_idx
+
+    def _build_selection_pool(self, population, region_fitnesses, box_usages):
+        """Build selection pool via per-region tournaments.
+
+        For each region, run multiple tournaments.  For each winner, take
+        its top contributing boxes for that region.  Merge results across all
+        regions into: {box_position (0-indexed): set of collection indices}.
+        """
+        pool = {}  # {box_position: set of collection_indices}
+
+        # Collect all regions present across individuals
+        all_regions = set()
+        for rf in region_fitnesses:
+            all_regions.update(rf.keys())
+
+        for region in all_regions:
+            for _ in range(self.region_tournament_rounds):
+                winner_idx = self._region_tournament_select(region_fitnesses, region)
+
+                # Top-K contributing boxes for this region from the winner
+                usage = box_usages[winner_idx].get(region, {})
+                if not usage:
+                    continue
+                top_boxes = sorted(usage.items(), key=lambda x: -x[1])[:self.top_boxes_per_region]
+
+                for box_name, _ in top_boxes:
+                    # "Box1" -> position 0, "Box2" -> position 1, …
+                    box_pos = int(box_name.replace("Box", "")) - 1
+                    if box_pos not in pool:
+                        pool[box_pos] = set()
+                    pool[box_pos].add(winner_idx)
+
+        return pool
+
+    def _construct_child_from_pool(self, pool, population):
+        """Construct one child by picking, for each box position, a random
+        collection from the pool and taking that collection's box at that position.
+
+        Positions not covered by the pool fall back to a random box.
+        """
+        child = []
+        for pos in range(self.number_of_boxes):
+            candidates = pool.get(pos)
+            if candidates:
+                chosen_idx = random.choice(list(candidates))
+                child.append(copy.deepcopy(population[chosen_idx][pos]))
+            else:
+                # Fallback: random box dimensions
+                dims = sorted([random.randint(self.dim_min, self.dim_max) for _ in range(3)], reverse=True)
+                child.append(dims)
+        # Re-sort by volume (ascending) for consistency
+        child.sort(key=lambda b: b[0] * b[1] * b[2])
+        return child
 
     def run(self):
-        # Implement the genetic algorithm to optimize the box assignment and bubble usage based on the valuation metrics
-        
+        """Run the GA. Returns (best_collection, best_fitness, history)."""
+        # Initialize population
+        population = [self._random_individual() for _ in range(self.population_size)]
+
+        # Evaluate initial population
+        fitnesses = [self._evaluate(ind)[0] for ind in population]
+
+        # Track best
+        best_idx = min(range(len(fitnesses)), key=lambda i: fitnesses[i])
+        best_individual = copy.deepcopy(population[best_idx])
+        best_fitness = fitnesses[best_idx]
+        history = [best_fitness]               # best fitness per generation
+        fitness_log = [list(fitnesses)]         # all fitnesses per generation (list of lists)
+
+        print(f"Gen 0: best fitness = {best_fitness:.6f}")
+
+        for gen in range(1, self.generations + 1):
+            # Elitism: carry forward top N
+            elite_indices = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i])[:self.elitism_count]
+            new_population = [copy.deepcopy(population[i]) for i in elite_indices]
+
+            # Random immigrants: inject fresh random individuals to maintain diversity
+            for _ in range(self.immigrant_count):
+                if len(new_population) < self.population_size:
+                    new_population.append(self._random_individual())
+
+            # Fill rest via selection, crossover, mutation
+            while len(new_population) < self.population_size:
+                parent1 = self._tournament_select(population, fitnesses)
+                parent2 = self._tournament_select(population, fitnesses)
+                child1, child2 = self._crossover(parent1, parent2)
+                child1 = self._mutate(child1)
+                child2 = self._mutate(child2)
+                new_population.append(child1)
+                if len(new_population) < self.population_size:
+                    new_population.append(child2)
+
+            population = new_population
+            fitnesses = [self._evaluate(ind)[0] for ind in population]
+
+            # Update best
+            gen_best_idx = min(range(len(fitnesses)), key=lambda i: fitnesses[i])
+            if fitnesses[gen_best_idx] < best_fitness:
+                best_individual = copy.deepcopy(population[gen_best_idx])
+                best_fitness = fitnesses[gen_best_idx]
+
+            history.append(best_fitness)
+            fitness_log.append(list(fitnesses))
+
+            if gen % 10 == 0 or gen == self.generations:
+                print(f"Gen {gen}: best fitness = {best_fitness:.6f}")
+
+        # Clean up temp file
+        if os.path.exists(self.filename):
+            os.remove(self.filename)
+
+        best_collection = Collection(self.number_of_boxes, best_individual)
+        return best_collection, best_fitness, history, fitness_log
+
+    # run() is naive. run_by_region() uses per-region tournament selection and
+    # box-level crossover informed by region performance — selecting the best-contributing
+    # boxes from the best-performing Collections in each region, then assembling new
+    # children from that pool.  Later we will compare the two approaches to see if
+    # the added complexity is justified by improved results or convergence speed.
+    def run_by_region(self):
+        """Region-informed GA: per-region tournaments → box-level crossover from selection pool.
+
+        Returns (best_collection, best_fitness, history, fitness_log).
+        """
+        # Initialize population
+        population = [self._random_individual() for _ in range(self.population_size)]
+
+        # Evaluate initial population — each returns (overall, region_dict, box_usage_dict)
+        eval_results = [self._evaluate(ind) for ind in population]
+        overall_fitnesses = [e[0] for e in eval_results]
+        region_fitnesses = [e[1] for e in eval_results]
+        box_usages = [e[2] for e in eval_results]
+
+        # Track best (by overall fitness)
+        best_idx = min(range(len(overall_fitnesses)), key=lambda i: overall_fitnesses[i])
+        best_individual = copy.deepcopy(population[best_idx])
+        best_fitness = overall_fitnesses[best_idx]
+        history = [best_fitness]
+        fitness_log = [list(overall_fitnesses)]
+
+        print(f"Gen 0: best fitness = {best_fitness:.6f}")
+
+        for gen in range(1, self.generations + 1):
+            # Elitism: carry forward top N by overall fitness
+            elite_indices = sorted(range(len(overall_fitnesses)), key=lambda i: overall_fitnesses[i])[:self.elitism_count]
+            new_population = [copy.deepcopy(population[i]) for i in elite_indices]
+
+            # Random immigrants
+            for _ in range(self.immigrant_count):
+                if len(new_population) < self.population_size:
+                    new_population.append(self._random_individual())
+
+            # Build selection pool from per-region tournaments
+            pool = self._build_selection_pool(population, region_fitnesses, box_usages)
+
+            # Determine how many children come from pool vs traditional crossover
+            remaining = self.population_size - len(new_population)
+            n_pool = int(remaining * self.pool_ratio)
+            n_crossover = remaining - n_pool
+
+            # Pool-based children
+            for _ in range(n_pool):
+                child = self._construct_child_from_pool(pool, population)
+                child = self._mutate(child)
+                new_population.append(child)
+
+            # Traditional crossover children (same as run())
+            while len(new_population) < self.population_size:
+                parent1 = self._tournament_select(population, overall_fitnesses)
+                parent2 = self._tournament_select(population, overall_fitnesses)
+                child1, child2 = self._crossover(parent1, parent2)
+                child1 = self._mutate(child1)
+                child2 = self._mutate(child2)
+                new_population.append(child1)
+                if len(new_population) < self.population_size:
+                    new_population.append(child2)
+
+            population = new_population
+            eval_results = [self._evaluate(ind) for ind in population]
+            overall_fitnesses = [e[0] for e in eval_results]
+            region_fitnesses = [e[1] for e in eval_results]
+            box_usages = [e[2] for e in eval_results]
+
+            # Update best
+            gen_best_idx = min(range(len(overall_fitnesses)), key=lambda i: overall_fitnesses[i])
+            if overall_fitnesses[gen_best_idx] < best_fitness:
+                best_individual = copy.deepcopy(population[gen_best_idx])
+                best_fitness = overall_fitnesses[gen_best_idx]
+
+            history.append(best_fitness)
+            fitness_log.append(list(overall_fitnesses))
+
+            if gen % 10 == 0 or gen == self.generations:
+                print(f"Gen {gen}: best fitness = {best_fitness:.6f}")
+
+        # Clean up temp file
+        if os.path.exists(self.filename):
+            os.remove(self.filename)
+
+        best_collection = Collection(self.number_of_boxes, best_individual)
+        return best_collection, best_fitness, history, fitness_log
