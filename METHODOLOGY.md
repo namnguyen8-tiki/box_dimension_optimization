@@ -200,48 +200,132 @@ Fitness = combined objective function $F$ from Section 3.4, evaluated on the rep
 
 ### 6.3 Operators
 
-**Initialization**: Random box dimensions — each dimension drawn uniformly from `[dim_min, dim_max]` as integers.
+**Initialization**: Random box dimensions — each dimension drawn as a random integer from `[dim_min, dim_max]`. All dimensions are integers throughout the entire pipeline (initialization, crossover, mutation).
 
 **Selection**: Tournament selection with configurable tournament size (default: 3). The individual with the lowest fitness in the tournament wins.
 
 **Crossover**: Single-point crossover at box level. A random cut point splits the parent Collections; boxes before the cut come from parent 1, boxes after from parent 2 (and vice versa for the second child). Applied with probability `crossover_rate` (default: 0.8). Children are re-sorted by volume.
 
-**Mutation**: Per-dimension Gaussian perturbation. Each dimension of each box is independently mutated with probability `mutation_rate` (default: 0.1). Perturbation drawn from $\mathcal{N}(0, \sigma^2)$ where $\sigma$ = `mutation_sigma` (default: 3.0). Result is clamped to bounds and re-sorted.
+**Mutation**: Per-dimension Gaussian perturbation. Each dimension of each box is independently mutated with probability `mutation_rate` (default: 0.1). Perturbation drawn from $\mathcal{N}(0, \sigma^2)$ where $\sigma$ = `mutation_sigma` (default: 3.0). Result is rounded to integer, clamped to bounds, and re-sorted.
 
 **Elitism**: Top `elitism_count` (default: 2) individuals are carried forward unchanged to the next generation.
 
-### 6.4 GA Loop
+**Random Immigrants**: `immigrant_count` (default: 3) fresh random individuals are injected each generation after elites, before selection/crossover. This maintains population diversity and helps escape local optima (Grefenstette, 1992).
+
+### 6.4 GA Loop — `run()` (Naive)
 
 ```
 1. Initialize population of random Collections
 2. Evaluate all individuals (create Valuation per Collection)
 3. For each generation:
-   a. Carry forward elite individuals
-   b. Fill remaining population via:
-      - Tournament selection of 2 parents
+   a. Carry forward elite individuals (elitism_count)
+   b. Inject random immigrants (immigrant_count)
+   c. Fill remaining population via:
+      - Tournament selection of 2 parents (based on overall fitness)
       - Crossover → 2 children
       - Mutation on each child
-   c. Evaluate all new individuals
-   d. Track best individual and full fitness log
+   d. Evaluate all new individuals
+   e. Track best individual and full fitness log
 4. Return best Collection, best fitness, per-generation best history, and full fitness log
 ```
 
-### 6.5 History & Diagnostics
+### 6.5 GA Loop — `run_by_region()` (Region-Informed)
+
+A domain-informed enhancement that uses per-region fitness decomposition to guide crossover. See Section 6.7 for full details.
+
+```
+1. Initialize population of random Collections
+2. Evaluate all individuals → (overall_fitness, region_fitness_dict, box_usage_by_region)
+3. For each generation:
+   a. Carry forward elite individuals (by overall fitness)
+   b. Inject random immigrants
+   c. Build selection pool via per-region tournaments (Section 6.7)
+   d. Generate pool_ratio fraction of children from pool (assemble + mutate)
+   e. Generate remaining children via traditional crossover (same as run())
+   f. Evaluate all new individuals
+   g. Track best individual and full fitness log
+4. Return best Collection, best fitness, per-generation best history, and full fitness log
+```
+
+The `pool_ratio` parameter (default: 0.5) controls the mix:
+- `pool_ratio=1.0` → all children from region pool (pure region-informed)
+- `pool_ratio=0.0` → all children from traditional crossover (equivalent to `run()`)
+- `pool_ratio=0.5` → half and half (default)
+
+### 6.6 History & Diagnostics
 
 The GA records two history structures:
 - **history**: List of best fitness per generation (length = generations + 1). For plotting convergence curves.
 - **fitness_log**: List of lists — all population fitnesses per generation. For scatter-plotting fitness distributions and analyzing diversity over time.
 
-### 6.6 Region-Based Crossover (Planned)
+### 6.7 Region-Decomposed Gene Pool Recombination
 
-A domain-informed enhancement to accelerate convergence:
+A domain-informed crossover mechanism that identifies the best-contributing boxes from the best-performing Collections in each region, then assembles new children from that pool. This approach combines ideas from:
 
-1. After each generation, compute per-region fitness using `results_by_region()`.
-2. Identify which boxes primarily serve which regions (via box assignment tracking).
-3. For well-performing regions, preserve the responsible boxes (reduced mutation).
-4. Focus mutation and crossover on boxes serving poorly-performing regions.
+- **Cooperative Coevolution** (Potter & De Jong, 2000): Decompose the problem into subcomponents (regions), evolve each independently, assemble solutions from the best parts.
+- **Gene Pool Recombination** (Mühlenbein & Voigt, 1996): Instead of pairwise crossover, build a pool of alleles from good individuals, then sample new individuals from the pool.
+- **MOEA/D** (Zhang & Li, 2007): Decompose into scalar subproblems and use subproblem-specific selection.
 
-This exploits the problem structure: small boxes serve small orders, large boxes serve large orders. If small-order performance is already good, there is no need to disrupt those box dimensions while improving large-order performance.
+The distinctive aspect of our approach: the decomposition is on the **evaluation side** (order regions defined by stratified bins) rather than the decision variable side — we use evaluation-side decomposition to inform which decision variables (box positions) to inherit from which parents.
+
+#### 6.7.1 Box Usage Tracking
+
+During Valuation, for each fittable order, we record which box was assigned in which region:
+
+```
+box_usage_by_region = {region: {box_name: count}}
+```
+
+For example: `{(2, 3, 1): {"Box3": 45, "Box4": 30, "Box5": 12}}` means in region (2,3,1), Box3 was used 45 times, Box4 was used 30 times, etc.
+
+#### 6.7.2 Per-Region Tournament Selection
+
+For each region (up to 125), run `region_tournament_rounds` (default: 3) tournaments:
+
+1. Sample `region_tournament_size` (default: 20) individuals from the population.
+2. Select the winner — the individual with the **lowest fitness in that specific region** (using `results_by_region()`).
+3. From the winner, take the **top `top_boxes_per_region`** (default: 3) most-used boxes in that region.
+4. Record these boxes' positions in the selection pool.
+
+#### 6.7.3 Selection Pool
+
+The pool aggregates across all regions into:
+
+```
+pool = {box_position (0-indexed): set of collection indices}
+```
+
+**Key properties:**
+- Medium-sized box positions (3–6) tend to have many candidate Collections (they serve many regions).
+- Extreme positions (smallest/largest) have fewer candidates — this correctly reflects that fewer Collections excel at handling extreme orders.
+- The asymmetry in pool size across positions is a feature, not a bug: it concentrates selection pressure where it matters.
+
+#### 6.7.4 Child Construction
+
+For each new child:
+1. For each box position 0 to N-1:
+   - If the pool has candidates at this position: randomly pick one Collection from the candidates, take its box dimensions at that position.
+   - If no candidates (uncovered position): generate random box dimensions as fallback.
+2. Re-sort the assembled child by volume for consistency.
+3. Apply standard Gaussian mutation.
+
+#### 6.7.5 Hybrid Ratio
+
+The `pool_ratio` parameter controls what fraction of children are produced via region pool vs. traditional crossover. This allows empirical tuning:
+
+| pool_ratio | Behavior |
+|------------|----------|
+| 1.0 | Pure region-informed (all children from pool) |
+| 0.5 | Half pool-based, half traditional crossover (default) |
+| 0.0 | Pure traditional crossover (equivalent to `run()`) |
+
+#### 6.7.6 Design Considerations
+
+**Epistasis (box synergy)**: Assembling boxes from different Collections creates combinations that weren't optimized together. However, re-evaluation + mutation in subsequent generations can "heal" suboptimal combinations. This is the primary tradeoff vs. `run()`.
+
+**Pool refresh**: The pool is rebuilt from scratch each generation based on newly evaluated individuals. Combined with mutation, this prevents stale selection pressure.
+
+**Comparison with `run()`**: Both approaches will be run on the same data with identical parameters (except `pool_ratio`). Comparing convergence speed and final fitness will determine whether the region-informed approach justifies its added complexity. This comparison is intended for paper publication.
 
 ## 7. Dependencies
 
@@ -268,8 +352,13 @@ This exploits the problem structure: small boxes serve small orders, large boxes
 | generations | 100 | GA number of generations |
 | mutation_rate | 0.1 | GA per-dimension mutation probability |
 | crossover_rate | 0.8 | GA crossover probability |
-| tournament_size | 3 | GA tournament selection size |
+| tournament_size | 3 | GA tournament selection size (for `run()` and traditional crossover in `run_by_region()`) |
 | elitism_count | 2 | GA number of elite individuals carried forward |
+| immigrant_count | 3 | Random immigrants injected per generation |
+| region_tournament_size | 20 | Tournament size for per-region selection in `run_by_region()` |
+| region_tournament_rounds | 3 | Number of tournaments per region for pool building |
+| top_boxes_per_region | 3 | Top contributing boxes taken per region per tournament winner |
+| pool_ratio | 0.5 | Fraction of children from region pool vs. traditional crossover |
 | dim_min | 5 | Minimum box dimension (cm) |
 | dim_max | 60 | Maximum box dimension (cm) |
 | mutation_sigma | 3.0 | Gaussian mutation standard deviation (cm) |
