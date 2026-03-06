@@ -80,11 +80,11 @@ class Valuation:
             number_of_buckets: int,
             collection: Collection,
             filename: str,
-            utilization_optimal: float = 0.9,
+            utilization_optimal: float = 0.8,
             reinforcement_thickness: float = 0.5,
             bubble_thickness: float = 1.0,
             bubble_filling_rate: float = 0.5,
-            objective_function_1_baseline: float = 1000000.0,  # baseline cost for normalization
+            objective_function_1_baseline: float = 5000.0,  # baseline cost for normalization
             objective_function_2_baseline: float = 0.1,  # baseline utilization deviation for normalization,
             objective_function_3_baseline: float = 0.05,
             objective_function_1_by_region_baseline: dict = None,  # optional baseline by region for objective function 1
@@ -100,6 +100,7 @@ class Valuation:
 
         df_box = collection.df_boxes
         
+        print(f"[Valuation] Starting evaluation with {len(data_order['order_code'].unique())} orders, {number_of_buckets} buckets...", flush=True)
         data_order_mod = copy.deepcopy(data_order)  # to avoid modifying the original dataframe
         # modify data_order to include reinforcement thickness for each item
         data_order_mod['length'] = data_order_mod['length'] + 2*reinforcement_thickness
@@ -125,12 +126,14 @@ class Valuation:
             processes.append(p)
         
         # Start all processes in parallel
+        print(f"[Valuation] Launching {len(processes)} parallel processes...", flush=True)
         for p in processes:
             p.start()
         
         # Wait for all processes to complete
         for p in processes:
             p.join()
+        print(f"[Valuation] All processes completed. Parsing results...", flush=True)
 
         # After all processes are done, we can read the results from the files and calculate the valuation metrics
         # read results from file
@@ -150,7 +153,7 @@ class Valuation:
         orders_by_region = {}  # total orders per region (for correct per-region averaging)
         box_usage_by_region = {}  # box usage per region for region-based GA: {region: {box_name: count}}
 
-        for order in unique_orders:
+        for order in tqdm(unique_orders):
             df_order_temp = data_order_mod[data_order_mod['order_code'] == order]
             item_volume = (df_order_temp['length'] * df_order_temp['width'] * df_order_temp['height'] * df_order_temp['unit']).sum()
             region = (df_order_temp['volume_bin'].iloc[0], df_order_temp['length_bin'].iloc[0], df_order_temp['unit_bin'].iloc[0])  # region definition based on stratification bins
@@ -213,6 +216,9 @@ class Valuation:
             self.objective_function_2_by_region[region] = objective_function_2_by_region.get(region, 0) / n_fittable if n_fittable > 0 else float('inf')
             self.objective_function_3_by_region[region] = n_unfittable / n_total
 
+        n_fittable_total = len(unique_orders) - int(objective_function_3 * len(unique_orders)) if self.objective_function_3 < 1 else 0
+        print(f"[Valuation] Done — f1={self.objective_function_1:.2f}, f2={self.objective_function_2:.6f}, f3={self.objective_function_3:.4f} ({len(unique_orders)} orders, {len(orders_by_region)} regions)", flush=True)
+
     def results(self, w1: float = 0.6, w2: float = 0.35, w3: float = 0.05, k: float = 3.0):
         """Combined objective function with exponential unfittable penalty.
         
@@ -259,15 +265,18 @@ class Sample:
             number_of_buckets_per_aspect: int = 5
     ) -> None:
         temp_data_order = copy.deepcopy(data_order)
+        n_orders = temp_data_order['order_code'].nunique()
+        print(f"[Sample] Building stratified sample: {sample_size} from {n_orders} orders, {number_of_buckets_per_aspect} bins/aspect...", flush=True)
         
-        # Build per-order summary for stratification
-        order_summary = temp_data_order.groupby('order_code').apply(
-            lambda df: pd.Series({
-                'total_volume': (df['length'] * df['width'] * df['height'] * df['unit']).sum(),
-                'max_length': df[['length', 'width', 'height']].max().max(),
-                'total_unit': df['unit'].sum()
-            })
-        ).reset_index()
+        # Build per-order summary for stratification (vectorized — avoids slow per-group .apply())
+        temp_data_order['_item_volume'] = temp_data_order['length'] * temp_data_order['width'] * temp_data_order['height'] * temp_data_order['unit']
+        grouped = temp_data_order.groupby('order_code')
+        order_summary = pd.DataFrame({
+            'total_volume': grouped['_item_volume'].sum(),
+            'max_length': temp_data_order[['order_code', 'length', 'width', 'height']].melt(id_vars='order_code', value_name='dim').groupby('order_code')['dim'].max(),
+            'total_unit': grouped['unit'].sum()
+        }).reset_index()
+        temp_data_order.drop(columns=['_item_volume'], inplace=True)
 
         # Create bins for stratification (use duplicates='drop' to handle non-unique values)
         order_summary['volume_bin'] = pd.qcut(order_summary['total_volume'], q=number_of_buckets_per_aspect, labels=False, duplicates='drop')
@@ -277,10 +286,14 @@ class Sample:
         # Stratified proportional sampling at ORDER level (not row level)
         sample_frac = sample_size / len(order_summary)
         
-        sampled_orders = order_summary.groupby(['volume_bin', 'length_bin', 'unit_bin']).apply(
-            lambda x: x.sample(max(1, int(len(x) * sample_frac)), replace=False)
-                if len(x) > 1 else x
-        ).reset_index(drop=True)
+        sampled_parts = []
+        for _, group in order_summary.groupby(['volume_bin', 'length_bin', 'unit_bin']):
+            n = max(1, int(len(group) * sample_frac))
+            if len(group) > 1:
+                sampled_parts.append(group.sample(n, replace=False))
+            else:
+                sampled_parts.append(group)
+        sampled_orders = pd.concat(sampled_parts, ignore_index=True)
 
         # Store order summary with features for KS test
         self.order_summary_full = order_summary
@@ -295,6 +308,7 @@ class Sample:
         bin_cols = order_summary[['order_code', 'volume_bin', 'length_bin', 'unit_bin']]
         self.sample = self.sample.merge(bin_cols, on='order_code', how='left')
         self.data_order = self.data_order.merge(bin_cols, on='order_code', how='left')
+        print(f"[Sample] Done — sampled {self.order_summary_sample['order_code'].nunique()} orders across {sampled_orders.groupby(['volume_bin','length_bin','unit_bin']).ngroups} strata", flush=True)
     
     def ks_test(self, p_value_threshold: float = 0.05, ks_stat_threshold: float = 0.1):
         # Perform KS test between the sample and the whole dataset for key aspects
@@ -308,13 +322,15 @@ class Sample:
 
         # return "Passed" if all p-values > 0.05 and ks_stat < 0.1 (assuming these thresholds for similarity), otherwise return "Failed"
         if all(p > p_value_threshold and ks < ks_stat_threshold for ks, p in result.values()):
-            return "Passed"
+            return "KS Test Passed"
         else:
-            return "Failed"
+            return "KS Test Failed"
         
     def valuation_test(self, collection: Collection, filename: str, w1: float = 0.6, w2: float = 0.35, w3: float = 0.05, tolerance: float = 0.1):
         # This function can be implemented to calculate the valuation metrics on the sample and compare them with the valuation metrics calculated on the whole dataset using the same Collection and filename for results.
+        print(f"[Valuation_test] Evaluating sample...", flush=True)
         valuation_sample = Valuation(self.sample, number_of_buckets=5, collection=collection, filename=filename)
+        print(f"[Valuation_test] Evaluating full dataset...", flush=True)
         valuation_full = Valuation(self.data_order, number_of_buckets=5, collection=collection, filename=filename)
 
         print(f"Valuation results for sample: {valuation_sample.results(w1, w2, w3)}")
@@ -323,9 +339,9 @@ class Sample:
 
         # return "Passed" if the valuation results are within 10% of each other, otherwise return "Failed"
         if abs(valuation_sample.results(w1, w2, w3) - valuation_full.results(w1, w2, w3)) / valuation_full.results(w1, w2, w3) < tolerance:
-            return "Passed"
+            return "Valuation Test Passed"
         else:
-            return "Failed"
+            return "Valuation Test Failed"
     
 class GeneticAlgorithm:
     def __init__(
@@ -349,7 +365,7 @@ class GeneticAlgorithm:
             mutation_sigma: float = 3.0,
             valuation_kwargs: dict = None,  # extra kwargs for Valuation (baselines, thicknesses, etc.)
             results_kwargs: dict = None,    # extra kwargs for results() (w1, w2, w3, k)
-            filename: str = 'ga_temp_result.csv'
+            filename: str = '/tmp/ga_temp_result.csv'  # /tmp/ is local-only, bypasses iCloud sync
     ) -> None:
         self.data_order = data_order
         self.number_of_boxes = number_of_boxes
@@ -516,7 +532,7 @@ class GeneticAlgorithm:
         history = [best_fitness]               # best fitness per generation
         fitness_log = [list(fitnesses)]         # all fitnesses per generation (list of lists)
 
-        print(f"Gen 0: best fitness = {best_fitness:.6f}")
+        print(f"Gen 0: best fitness = {best_fitness:.6f}", flush=True)
 
         for gen in range(1, self.generations + 1):
             # Elitism: carry forward top N
@@ -552,7 +568,7 @@ class GeneticAlgorithm:
             fitness_log.append(list(fitnesses))
 
             if gen % 10 == 0 or gen == self.generations:
-                print(f"Gen {gen}: best fitness = {best_fitness:.6f}")
+                print(f"Gen {gen}: best fitness = {best_fitness:.6f}", flush=True)
 
         # Clean up temp file
         if os.path.exists(self.filename):
@@ -587,7 +603,7 @@ class GeneticAlgorithm:
         history = [best_fitness]
         fitness_log = [list(overall_fitnesses)]
 
-        print(f"Gen 0: best fitness = {best_fitness:.6f}")
+        print(f"Gen 0: best fitness = {best_fitness:.6f}", flush=True)
 
         for gen in range(1, self.generations + 1):
             # Elitism: carry forward top N by overall fitness
@@ -640,7 +656,7 @@ class GeneticAlgorithm:
             fitness_log.append(list(overall_fitnesses))
 
             if gen % 10 == 0 or gen == self.generations:
-                print(f"Gen {gen}: best fitness = {best_fitness:.6f}")
+                print(f"Gen {gen}: best fitness = {best_fitness:.6f}", flush=True)
 
         # Clean up temp file
         if os.path.exists(self.filename):

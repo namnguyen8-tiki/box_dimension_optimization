@@ -41,19 +41,19 @@ For each fittable order i assigned to a box:
 $$f_1 = \frac{1}{N_{fittable}} \sum_{i=1}^{N_{fittable}} \left( C_{box,i} + C_{bubble,i} \right)$$
 
 Where:
-- $C_{box,i}$ = cost of the chosen box, proportional to its surface area: $2(lw + lh + wh) \times \text{unit\_cost}$
-- $C_{bubble,i}$ = cost of bubble wrap filling the unused space: $\frac{61000}{35 \times 90 \times 100 \times t} \times V_{bubble,i}$
-- $V_{bubble,i} = (V_{box,i} - V_{items,i}) \times \text{filling\_rate}$
+- $C\_{box,i}$ = cost of the chosen box, proportional to its surface area: $2(lw + lh + wh) \times \text{unit\_cost}$
+- $C\_{bubble,i}$ = cost of bubble wrap filling the unused space: $\frac{61000}{35 \times 90 \times 100 \times t} \times V\_{bubble,i}$
+- $V\_{bubble,i} = (V\_{box,i} - V\_{items,i}) \times \text{filling\_rate}$
 - $t$ = bubble thickness
-- $N_{fittable}$ = number of orders successfully assigned to a box
+- $N\_{fittable}$ = number of orders successfully assigned to a box
 
 ### 3.2 Objective Function 2 — Utilization Optimization
 
 $$f_2 = \frac{1}{N_{fittable}} \sum_{i=1}^{N_{fittable}} \left( \frac{V_{items,i}}{V_{box,i}} - u^* \right)^2$$
 
 Where:
-- $V_{items,i}$ = total volume of items in order i (after adding reinforcement thickness)
-- $V_{box,i}$ = volume of the chosen box
+- $V\_{items,i}$ = total volume of items in order i (after adding reinforcement thickness)
+- $V\_{box,i}$ = volume of the chosen box
 - $u^*$ = target utilization ratio (default: 0.9)
 
 This is the Mean Squared Error (MSE) of utilization relative to the target. Averaged over fittable orders only, making it scale-independent.
@@ -63,31 +63,31 @@ This is the Mean Squared Error (MSE) of utilization relative to the target. Aver
 $$f_3 = \frac{N_{unfittable}}{N_{total}}$$
 
 Where:
-- $N_{unfittable}$ = number of orders that could not be packed (detected via algorithm_BPS markers: `"No satisfied Box"` or `"Cannot find any satisfied Box in the given time"`)
-- $N_{total}$ = total number of orders evaluated
+- $N\_{unfittable}$ = number of orders that could not be packed (detected via algorithm_BPS markers: `"No satisfied Box"` or `"Cannot find any satisfied Box in the given time"`)
+- $N\_{total}$ = total number of orders evaluated
 
-**Design rationale**: Unfittable orders are structurally expected — some orders have too many items (15–20) or volumes exceeding all boxes. These truly-unfittable orders represent a **natural constant** regardless of Collection. The remaining unfittable orders indicate Collection sparsity (the algorithm can't find a fit in time for that box configuration). A good Collection should bring $f_3$ close to this natural baseline.
+**Design rationale**: Unfittable orders are structurally expected — some orders have too many items (15–20) or volumes exceeding all boxes. These truly-unfittable orders represent a **natural constant** regardless of Collection. The remaining unfittable orders indicate Collection sparsity (the algorithm can't find a fit in time for that box configuration). A good Collection should bring $f\_3$ close to this natural baseline.
 
 ### 3.4 Combined Objective — Weighted Sum with Exponential Penalty
 
 $$F = w_1 \cdot \frac{f_1}{b_1} + w_2 \cdot \frac{f_2}{b_2} + w_3 \cdot g(f_3)$$
 
 Where:
-- $b_1$, $b_2$ = baseline values for normalization (from current/reference Collection)
-- $w_1 = 0.6$, $w_2 = 0.35$, $w_3 = 0.05$ (sum = 1.0, prioritizing cost)
+- $b\_1$, $b\_2$ = baseline values for normalization (from current/reference Collection)
+- $w\_1 = 0.6$, $w\_2 = 0.35$, $w\_3 = 0.05$ (sum = 1.0, prioritizing cost)
 
 **Exponential penalty function for f3:**
 
 $$g(f_3) = e^{k \cdot (f_3/b_3 - 1)} - 1$$
 
 Properties:
-- $f_3 = b_3 \Rightarrow g = 0$ (neutral — no penalty, no reward)
-- $f_3 \gg b_3 \Rightarrow$ exponential growth (harsh penalty for Collections producing many more unfittable orders)
-- $f_3 \ll b_3 \Rightarrow g \to -1$ (reward, bounded since $f_3 \geq 0$)
-- Near $b_3$: approximately linear $g \approx k \cdot (f_3/b_3 - 1)$ (mild)
+- $f\_3 = b\_3 \Rightarrow g = 0$ (neutral — no penalty, no reward)
+- $f\_3 \gg b\_3 \Rightarrow$ exponential growth (harsh penalty for Collections producing many more unfittable orders)
+- $f\_3 \ll b\_3 \Rightarrow g \to -1$ (reward, bounded since $f\_3 \geq 0$)
+- Near $b\_3$: approximately linear $g \approx k \cdot (f\_3/b\_3 - 1)$ (mild)
 - $k$ controls sensitivity (default: 3.0)
 
-**Why exponential instead of linear?** The natural constant of truly-unfittable orders means $b_3$ represents a baseline. Collections near $b_3$ are normal — only Collections significantly worse need harsh punishment. The exponential's asymmetric shape (unbounded penalty upward, bounded reward downward) matches this physical reality.
+**Why exponential instead of linear?** The natural constant of truly-unfittable orders means $b\_3$ represents a baseline. Collections near $b\_3$ are normal — only Collections significantly worse need harsh punishment. The exponential's asymmetric shape (unbounded penalty upward, bounded reward downward) matches this physical reality.
 
 ### 3.5 Per-Region Metrics
 
@@ -337,16 +337,16 @@ The `pool_ratio` parameter controls what fraction of children are produced via r
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | number_of_boxes | (input) | Number of box types in a Collection |
-| utilization_optimal | 0.9 | Target box utilization ratio |
+| utilization_optimal | 0.8 | Target box utilization ratio |
 | reinforcement_thickness | 0.5 cm | Protective wrapping thickness per side |
 | bubble_thickness | 1.0 cm | Bubble wrap material thickness |
 | bubble_filling_rate | 0.5 | Fraction of empty space filled with bubble wrap |
-| objective_function_1_baseline | 1,000,000 | Cost normalization baseline |
+| objective_function_1_baseline | 5,000 | Cost normalization baseline |
 | objective_function_2_baseline | 0.1 | Utilization deviation normalization baseline |
 | objective_function_3_baseline | 0.05 | Natural unfittable ratio baseline |
 | w1, w2, w3 | 0.6, 0.35, 0.05 | Objective function weights (sum = 1.0) |
 | k | 3.0 | Exponential penalty sensitivity for f3 |
-| sample_size | 10,000 | Number of orders in representative sample |
+| sample_size | 100,000 | Number of orders in representative sample |
 | number_of_buckets_per_aspect | 5 | Number of quantile bins per stratification feature |
 | population_size | 50 | GA population size |
 | generations | 100 | GA number of generations |
