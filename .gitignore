@@ -1,7 +1,11 @@
 # CSV data files (too large for GitHub)
 *.csv
 *.txt
-data/
+data/*
+
+# Exceptions — tracked CSV files
+!data/data_box_external.csv
+!data/data_box_tikicorp.csv
 
 # macOS
 .DS_Store
