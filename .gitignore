@@ -1,0 +1,14 @@
+# CSV data files (too large for GitHub)
+*.csv
+*.txt
+data/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/

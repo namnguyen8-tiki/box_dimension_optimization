@@ -30,7 +30,8 @@ class Collection:
             length, width, height = box
             self.boxes_volumes.append(length * width * height)
             # assume the cost of the box is proportional to its surface area, and the cost per unit area is 1000 --> will update later after checking with Procurement team
-            self.boxes_cost.append(2*(length*width + length*height + width*height) * 1000)
+            s = (((length+width)*2+50)*(width+height+30))/10000
+            self.boxes_cost.append(9400/1000*((s*(120+90+120))) + (300+40)*s)
 
         self.df_boxes = pd.DataFrame({
             'id': list(range(1, number_of_boxes+1)),
@@ -63,15 +64,15 @@ def process(
         filename
         ):
     order_list = df_bucket['order_code'].unique()
-    for order in order_list:
+    for order in tqdm(order_list):
         df_order = df_bucket[df_bucket['order_code'] == order]
-        k = Thread(
-            target=box_packing_solution,
-            args=(df_order, df_box, 'balanced', 100, 100, 30, filename)
-        )
-
-        k.start()
-        k.join()
+        box_packing_solution(df_order, df_box, 'balanced', 100, 100, 30, filename)
+        # k = Thread(
+        #     target=box_packing_solution,
+        #     args=(df_order, df_box, 'balanced', 100, 100, 30, filename)
+        # )
+        # k.start()
+        # k.join()
 
 class Valuation:
     def __init__(
@@ -87,37 +88,42 @@ class Valuation:
             objective_function_1_baseline: float = 5000.0,  # baseline cost for normalization
             objective_function_2_baseline: float = 0.1,  # baseline utilization deviation for normalization,
             objective_function_3_baseline: float = 0.05,
-            objective_function_1_by_region_baseline: dict = None,  # optional baseline by region for objective function 1
-            objective_function_2_by_region_baseline: dict = None,  # optional baseline by region for objective function 2
-            objective_function_3_by_region_baseline: dict = None
+            _precomputed: dict = None  # internal: pre-computed data_order_mod, unique_orders, buckets (used by GA to skip redundant work)
     ) -> None:
         self.objective_function_1_baseline = objective_function_1_baseline
         self.objective_function_2_baseline = objective_function_2_baseline
         self.objective_function_3_baseline = objective_function_3_baseline
-        self.objective_function_1_by_region_baseline = objective_function_1_by_region_baseline if objective_function_1_by_region_baseline is not None else {}
-        self.objective_function_2_by_region_baseline = objective_function_2_by_region_baseline if objective_function_2_by_region_baseline is not None else {}
-        self.objective_function_3_by_region_baseline = objective_function_3_by_region_baseline if objective_function_3_by_region_baseline is not None else {}
 
         df_box = collection.df_boxes
         
-        print(f"[Valuation] Starting evaluation with {len(data_order['order_code'].unique())} orders, {number_of_buckets} buckets...", flush=True)
-        data_order_mod = copy.deepcopy(data_order)  # to avoid modifying the original dataframe
-        # modify data_order to include reinforcement thickness for each item
-        data_order_mod['length'] = data_order_mod['length'] + 2*reinforcement_thickness
-        data_order_mod['width'] = data_order_mod['width'] + 2*reinforcement_thickness
-        data_order_mod['height'] = data_order_mod['height'] + 2*reinforcement_thickness
+        # Clear stale results and create fresh CSV with header (using algorithm_BPS's create_new_file)
+        create_new_file(filename)
 
-        # Get unique orders and assign them round-robin bucket numbers
-        unique_orders = data_order_mod['order_code'].unique()
-        bucket_assignment = {order: i % number_of_buckets for i, order in enumerate(unique_orders)}
-        
-        # Map those assignments back to all rows (ensures all rows of same order go to same bucket)
-        data_order_mod['bucket'] = data_order_mod['order_code'].map(bucket_assignment)
-        
-        # Create buckets dictionary
-        buckets = {}
-        for bucket in data_order_mod['bucket'].unique():
-            buckets[bucket] = data_order_mod[data_order_mod['bucket'] == bucket]
+        if _precomputed is not None:
+            # Fast path: GA already prepared these once
+            data_order_mod = _precomputed['data_order_mod']
+            unique_orders = _precomputed['unique_orders']
+            buckets = _precomputed['buckets']
+            print(f"[Valuation] Starting evaluation with {len(unique_orders)} orders, {len(buckets)} buckets (precomputed)...", flush=True)
+        else:
+            print(f"[Valuation] Starting evaluation with {len(data_order['order_code'].unique())} orders, {number_of_buckets} buckets...", flush=True)
+            data_order_mod = copy.deepcopy(data_order)  # to avoid modifying the original dataframe
+            # modify data_order to include reinforcement thickness for each item
+            data_order_mod['length'] = data_order_mod['length'] + 2*reinforcement_thickness
+            data_order_mod['width'] = data_order_mod['width'] + 2*reinforcement_thickness
+            data_order_mod['height'] = data_order_mod['height'] + 2*reinforcement_thickness
+
+            # Get unique orders and assign them round-robin bucket numbers
+            unique_orders = data_order_mod['order_code'].unique()
+            bucket_assignment = {order: i % number_of_buckets for i, order in enumerate(unique_orders)}
+            
+            # Map those assignments back to all rows (ensures all rows of same order go to same bucket)
+            data_order_mod['bucket'] = data_order_mod['order_code'].map(bucket_assignment)
+
+            # Create buckets dictionary
+            buckets = {}
+            for bucket in data_order_mod['bucket'].unique():
+                buckets[bucket] = data_order_mod[data_order_mod['bucket'] == bucket]
         
         # Create all processes
         processes = []
@@ -242,8 +248,7 @@ class Valuation:
             f1 = self.objective_function_1_by_region.get(region, float('inf'))
             f2 = self.objective_function_2_by_region.get(region, float('inf'))
             f3 = self.objective_function_3_by_region.get(region, 1.0)  # default to worst case if region missing
-            b3 = self.objective_function_3_by_region_baseline.get(region, self.objective_function_3_baseline)
-            g_f3 = math.exp(k * (f3 / b3 - 1)) - 1 if b3 > 0 else (0.0 if f3 == 0 else float('inf'))
+            g_f3 = math.exp(k * (f3 / self.objective_function_3_baseline - 1)) - 1
             results_by_region[region] = (w1 * (f1 / self.objective_function_1_baseline) 
                                         + w2 * (f2 / self.objective_function_2_baseline) 
                                         + w3 * g_f3)
@@ -262,11 +267,11 @@ class Sample:
             self,
             data_order: pd.DataFrame,
             sample_size: int = 10000,
-            number_of_buckets_per_aspect: int = 5
+            number_of_regions_per_aspect: int = 5
     ) -> None:
         temp_data_order = copy.deepcopy(data_order)
         n_orders = temp_data_order['order_code'].nunique()
-        print(f"[Sample] Building stratified sample: {sample_size} from {n_orders} orders, {number_of_buckets_per_aspect} bins/aspect...", flush=True)
+        print(f"[Sample] Building stratified sample: {sample_size} from {n_orders} orders, {number_of_regions_per_aspect} bins/aspect...", flush=True)
         
         # Build per-order summary for stratification (vectorized — avoids slow per-group .apply())
         temp_data_order['_item_volume'] = temp_data_order['length'] * temp_data_order['width'] * temp_data_order['height'] * temp_data_order['unit']
@@ -279,9 +284,9 @@ class Sample:
         temp_data_order.drop(columns=['_item_volume'], inplace=True)
 
         # Create bins for stratification (use duplicates='drop' to handle non-unique values)
-        order_summary['volume_bin'] = pd.qcut(order_summary['total_volume'], q=number_of_buckets_per_aspect, labels=False, duplicates='drop')
-        order_summary['length_bin'] = pd.qcut(order_summary['max_length'], q=number_of_buckets_per_aspect, labels=False, duplicates='drop')
-        order_summary['unit_bin'] = pd.qcut(order_summary['total_unit'], q=number_of_buckets_per_aspect, labels=False, duplicates='drop')
+        order_summary['volume_bin'] = pd.qcut(order_summary['total_volume'], q=number_of_regions_per_aspect, labels=False, duplicates='drop')
+        order_summary['length_bin'] = pd.qcut(order_summary['max_length'], q=number_of_regions_per_aspect, labels=False, duplicates='drop')
+        order_summary['unit_bin'] = pd.qcut(order_summary['total_unit'], q=number_of_regions_per_aspect, labels=False, duplicates='drop')
 
         # Stratified proportional sampling at ORDER level (not row level)
         sample_frac = sample_size / len(order_summary)
@@ -326,7 +331,15 @@ class Sample:
         else:
             return "KS Test Failed"
         
-    def valuation_test(self, collection: Collection, filename: str, w1: float = 0.6, w2: float = 0.35, w3: float = 0.05, tolerance: float = 0.1):
+    def valuation_test(
+            self, 
+            collection: Collection, 
+            filename: str, 
+            w1: float = 0.6, 
+            w2: float = 0.35, 
+            w3: float = 0.05, 
+            tolerance: float = 0.1,
+            log_filename: str = 'valuation_test_log.csv'):
         # This function can be implemented to calculate the valuation metrics on the sample and compare them with the valuation metrics calculated on the whole dataset using the same Collection and filename for results.
         print(f"[Valuation_test] Evaluating sample...", flush=True)
         valuation_sample = Valuation(self.sample, number_of_buckets=5, collection=collection, filename=filename)
@@ -335,13 +348,29 @@ class Sample:
 
         print(f"Valuation results for sample: {valuation_sample.results(w1, w2, w3)}")
         print(f"Valuation results for full dataset: {valuation_full.results(w1, w2, w3)}")
-        print(f"Unfittable ratio — sample: {valuation_sample.objective_function_3:.4f}, full: {valuation_full.objective_function_3:.4f}")
+        # log into a csv the individual objective function values for sample and full dataset for later using as baselines in GA
+        valuation_log = pd.DataFrame({
+            'dataset': ['sample', 'full'],
+            'objective_function_1': [valuation_sample.objective_function_1, valuation_full.objective_function_1],
+            'objective_function_2': [valuation_sample.objective_function_2, valuation_full.objective_function_2],
+            'objective_function_3': [valuation_sample.objective_function_3, valuation_full.objective_function_3]
+        })
+
+        valuation_log.to_csv(log_filename, index=False)
+        print(f"[Valuation_test] Logged individual objective function values to {log_filename}", flush=True)
+
+        # print(f"Unfittable ratio — sample: {valuation_sample.objective_function_3:.4f}, full: {valuation_full.objective_function_3:.4f}")
 
         # return "Passed" if the valuation results are within 10% of each other, otherwise return "Failed"
         if abs(valuation_sample.results(w1, w2, w3) - valuation_full.results(w1, w2, w3)) / valuation_full.results(w1, w2, w3) < tolerance:
             return "Valuation Test Passed"
         else:
             return "Valuation Test Failed"
+
+    def record_sample(self, filename: str):
+        # Save the sample data to a CSV file for reference if it passes the tests
+        self.sample.to_csv(filename, index=False)
+        print(f"[Sample] Sample data recorded to {filename}", flush=True)
     
 class GeneticAlgorithm:
     def __init__(
@@ -388,6 +417,22 @@ class GeneticAlgorithm:
         self.results_kwargs = results_kwargs or {}
         self.filename = filename
 
+        # Pre-compute data_order_mod once (reinforcement + bucketing) to avoid repeating per evaluation
+        reinforcement_thickness = self.valuation_kwargs.get('reinforcement_thickness', 0.5)
+        data_order_mod = data_order.copy()
+        data_order_mod['length'] = data_order_mod['length'] + 2 * reinforcement_thickness
+        data_order_mod['width'] = data_order_mod['width'] + 2 * reinforcement_thickness
+        data_order_mod['height'] = data_order_mod['height'] + 2 * reinforcement_thickness
+        unique_orders = data_order_mod['order_code'].unique()
+        bucket_assignment = {order: i % number_of_buckets for i, order in enumerate(unique_orders)}
+        data_order_mod['bucket'] = data_order_mod['order_code'].map(bucket_assignment)
+        buckets = {b: data_order_mod[data_order_mod['bucket'] == b] for b in data_order_mod['bucket'].unique()}
+        self._precomputed = {
+            'data_order_mod': data_order_mod,
+            'unique_orders': unique_orders,
+            'buckets': buckets,
+        }
+
     def _random_individual(self):
         """Generate random box dimensions: list of [L, W, H], sorted by volume."""
         boxes = []
@@ -400,15 +445,13 @@ class GeneticAlgorithm:
 
     def _evaluate(self, individual):
         """Evaluate fitness of an individual (lower is better)."""
-        # Remove stale CSV so results don't bleed across evaluations
-        if os.path.exists(self.filename):
-            os.remove(self.filename)
         collection = Collection(self.number_of_boxes, individual)
         valuation = Valuation(
             data_order=self.data_order,
             number_of_buckets=self.number_of_buckets,
             collection=collection,
             filename=self.filename,
+            _precomputed=self._precomputed,
             **self.valuation_kwargs
         )
         return (
@@ -517,8 +560,8 @@ class GeneticAlgorithm:
         child.sort(key=lambda b: b[0] * b[1] * b[2])
         return child
 
-    def run(self):
-        """Run the GA. Returns (best_collection, best_fitness, history)."""
+    def run(self, run_id: int = 1):
+        """Run the GA. Returns (best_collection, best_fitness, fitness_log)."""
         # Initialize population
         population = [self._random_individual() for _ in range(self.population_size)]
 
@@ -529,12 +572,12 @@ class GeneticAlgorithm:
         best_idx = min(range(len(fitnesses)), key=lambda i: fitnesses[i])
         best_individual = copy.deepcopy(population[best_idx])
         best_fitness = fitnesses[best_idx]
-        history = [best_fitness]               # best fitness per generation
-        fitness_log = [list(fitnesses)]         # all fitnesses per generation (list of lists)
+        fitness_log = [list(fitnesses)]         # all fitnesses per generation (N columns x M rows)
 
         print(f"Gen 0: best fitness = {best_fitness:.6f}", flush=True)
 
-        for gen in range(1, self.generations + 1):
+        for gen in tqdm(range(1, self.generations + 1), desc="GA Progress"):
+            print(f"Starting generation {gen}...", flush=True)
             # Elitism: carry forward top N
             elite_indices = sorted(range(len(fitnesses)), key=lambda i: fitnesses[i])[:self.elitism_count]
             new_population = [copy.deepcopy(population[i]) for i in elite_indices]
@@ -564,7 +607,6 @@ class GeneticAlgorithm:
                 best_individual = copy.deepcopy(population[gen_best_idx])
                 best_fitness = fitnesses[gen_best_idx]
 
-            history.append(best_fitness)
             fitness_log.append(list(fitnesses))
 
             if gen % 10 == 0 or gen == self.generations:
@@ -575,17 +617,22 @@ class GeneticAlgorithm:
             os.remove(self.filename)
 
         best_collection = Collection(self.number_of_boxes, best_individual)
-        return best_collection, best_fitness, history, fitness_log
+
+        # Log results — csv for analysis
+        pd.DataFrame(fitness_log).to_csv(f'ga_run_fitness_log_{run_id}.csv', index=False)
+        best_collection.df_boxes.to_csv(f'ga_run_best_collection_{run_id}.csv', index=False)
+
+        return best_collection, best_fitness, fitness_log
 
     # run() is naive. run_by_region() uses per-region tournament selection and
     # box-level crossover informed by region performance — selecting the best-contributing
     # boxes from the best-performing Collections in each region, then assembling new
     # children from that pool.  Later we will compare the two approaches to see if
     # the added complexity is justified by improved results or convergence speed.
-    def run_by_region(self):
+    def run_by_region(self, run_id: int = 1):
         """Region-informed GA: per-region tournaments → box-level crossover from selection pool.
 
-        Returns (best_collection, best_fitness, history, fitness_log).
+        Returns (best_collection, best_fitness, fitness_log).
         """
         # Initialize population
         population = [self._random_individual() for _ in range(self.population_size)]
@@ -600,12 +647,12 @@ class GeneticAlgorithm:
         best_idx = min(range(len(overall_fitnesses)), key=lambda i: overall_fitnesses[i])
         best_individual = copy.deepcopy(population[best_idx])
         best_fitness = overall_fitnesses[best_idx]
-        history = [best_fitness]
         fitness_log = [list(overall_fitnesses)]
 
         print(f"Gen 0: best fitness = {best_fitness:.6f}", flush=True)
 
-        for gen in range(1, self.generations + 1):
+        for gen in tqdm(range(1, self.generations + 1), desc="GA Progress"):
+            print(f"Starting generation {gen}...", flush=True)
             # Elitism: carry forward top N by overall fitness
             elite_indices = sorted(range(len(overall_fitnesses)), key=lambda i: overall_fitnesses[i])[:self.elitism_count]
             new_population = [copy.deepcopy(population[i]) for i in elite_indices]
@@ -652,7 +699,6 @@ class GeneticAlgorithm:
                 best_individual = copy.deepcopy(population[gen_best_idx])
                 best_fitness = overall_fitnesses[gen_best_idx]
 
-            history.append(best_fitness)
             fitness_log.append(list(overall_fitnesses))
 
             if gen % 10 == 0 or gen == self.generations:
@@ -663,4 +709,9 @@ class GeneticAlgorithm:
             os.remove(self.filename)
 
         best_collection = Collection(self.number_of_boxes, best_individual)
-        return best_collection, best_fitness, history, fitness_log
+
+        # Log results — csv for analysis
+        pd.DataFrame(fitness_log).to_csv(f'ga_region_fitness_log_{run_id}.csv', index=False)
+        best_collection.df_boxes.to_csv(f'ga_region_best_collection_{run_id}.csv', index=False)
+
+        return best_collection, best_fitness, fitness_log

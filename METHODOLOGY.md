@@ -192,7 +192,7 @@ Each individual (chromosome) represents a candidate Collection: a list of N box 
 Constraints maintained throughout:
 - Within each box: dimensions sorted descending (L ≥ W ≥ H)
 - Boxes sorted by volume ascending (consistent ordering eliminates permutation redundancy)
-- All dimensions clamped to `[dim_min, dim_max]` (default: 5–60)
+- All dimensions clamped to `[dim_min, dim_max]` (default: 4–60)
 
 ### 6.2 Fitness Function
 
@@ -247,10 +247,10 @@ A domain-informed enhancement that uses per-region fitness decomposition to guid
 4. Return best Collection, best fitness, per-generation best history, and full fitness log
 ```
 
-The `pool_ratio` parameter (default: 0.5) controls the mix:
+The `pool_ratio` parameter (default: 0.3) controls the mix:
 - `pool_ratio=1.0` → all children from region pool (pure region-informed)
 - `pool_ratio=0.0` → all children from traditional crossover (equivalent to `run()`)
-- `pool_ratio=0.5` → half and half (default)
+- `pool_ratio=0.3` → 30% pool-based, 70% traditional crossover (default)
 
 ### 6.6 History & Diagnostics
 
@@ -316,7 +316,7 @@ The `pool_ratio` parameter controls what fraction of children are produced via r
 | pool_ratio | Behavior |
 |------------|----------|
 | 1.0 | Pure region-informed (all children from pool) |
-| 0.5 | Half pool-based, half traditional crossover (default) |
+| 0.3 | 30% pool-based, 70% traditional crossover (default) |
 | 0.0 | Pure traditional crossover (equivalent to `run()`) |
 
 #### 6.7.6 Design Considerations
@@ -347,7 +347,7 @@ The `pool_ratio` parameter controls what fraction of children are produced via r
 | w1, w2, w3 | 0.6, 0.35, 0.05 | Objective function weights (sum = 1.0) |
 | k | 3.0 | Exponential penalty sensitivity for f3 |
 | sample_size | 100,000 | Number of orders in representative sample |
-| number_of_buckets_per_aspect | 5 | Number of quantile bins per stratification feature |
+| number_of_regions_per_aspect | 5 | Number of quantile bins per stratification feature |
 | population_size | 50 | GA population size |
 | generations | 100 | GA number of generations |
 | mutation_rate | 0.1 | GA per-dimension mutation probability |
@@ -358,7 +358,7 @@ The `pool_ratio` parameter controls what fraction of children are produced via r
 | region_tournament_size | 20 | Tournament size for per-region selection in `run_by_region()` |
 | region_tournament_rounds | 3 | Number of tournaments per region for pool building |
 | top_boxes_per_region | 3 | Top contributing boxes taken per region per tournament winner |
-| pool_ratio | 0.5 | Fraction of children from region pool vs. traditional crossover |
-| dim_min | 5 | Minimum box dimension (cm) |
+| pool_ratio | 0.3 | Fraction of children from region pool vs. traditional crossover |
+| dim_min | 4 | Minimum box dimension (cm) |
 | dim_max | 60 | Maximum box dimension (cm) |
 | mutation_sigma | 3.0 | Gaussian mutation standard deviation (cm) |
