@@ -29,9 +29,9 @@ class Collection:
         for box in boxes_dimensions:
             length, width, height = box
             self.boxes_volumes.append(length * width * height)
-            # assume the cost of the box is proportional to its surface area, and the cost per unit area is 1000 --> will update later after checking with Procurement team
+
             s = (((length+width)*2+50)*(width+height+30))/10000
-            self.boxes_cost.append(9400/1000*((s*(120+90+120))) + (300+40)*s)
+            self.boxes_cost.append(9400/1000*((s*(120+90*1.31+120))) + (300+40)*s)
 
         self.df_boxes = pd.DataFrame({
             'id': list(range(1, number_of_boxes+1)),

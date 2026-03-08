@@ -41,19 +41,26 @@ For each fittable order i assigned to a box:
 $$f_1 = \frac{1}{N_{\text{fittable}}} \sum_{i=1}^{N_{\text{fittable}}} \left( C_{\text{box},i} + C_{\text{bubble},i} \right)$$
 
 Where:
-- $C\_{box,i}$ = cost of the chosen box, proportional to its surface area: $2(lw + lh + wh) \times \text{unit\_cost}$
-- $C\_{bubble,i}$ = cost of bubble wrap filling the unused space: $\frac{61000}{35 \times 90 \times 100 \times t} \times V\_{bubble,i}$
-- $V\_{bubble,i} = (V\_{box,i} - V\_{items,i}) \times \text{filling\_rate}$
+- $C_{\text{box},i}$ = production cost of the chosen box, computed from the flat cardboard sheet area $s_i$:
+
+$$s_i = \frac{(2(l_i + w_i) + 50)(w_i + h_i + 30)}{10000} \text{ (m}^2\text{)}$$
+
+$$C_{\text{box},i} = \frac{9400}{1000} \cdot s_i \cdot (120 + 90 \times 1.31 + 120) + 340 \cdot s_i$$
+
+  Where +50 cm and +30 cm are flap/tab allowances on the flat sheet layout.
+
+- $C_{\text{bubble},i}$ = cost of bubble wrap filling the unused space: $\frac{61000}{35 \times 90 \times 100 \times t} \times V_{\text{bubble},i}$
+- $V_{\text{bubble},i} = (V_{\text{box},i} - V_{\text{items},i}) \times \text{filling rate}$
 - $t$ = bubble thickness
-- $N\_{fittable}$ = number of orders successfully assigned to a box
+- $N_{\text{fittable}}$ = number of orders successfully assigned to a box
 
 ### 3.2 Objective Function 2 — Utilization Optimization
 
 $$f_2 = \frac{1}{N_{\text{fittable}}} \sum_{i=1}^{N_{\text{fittable}}} \left( \frac{V_{\text{items},i}}{V_{\text{box},i}} - u^* \right)^2$$
 
 Where:
-- $V\_{items,i}$ = total volume of items in order i (after adding reinforcement thickness)
-- $V\_{box,i}$ = volume of the chosen box
+- $V_{\text{items},i}$ = total volume of items in order i (after adding reinforcement thickness)
+- $V_{\text{box},i}$ = volume of the chosen box
 - $u^*$ = target utilization ratio (default: 0.9)
 
 This is the Mean Squared Error (MSE) of utilization relative to the target. Averaged over fittable orders only, making it scale-independent.
@@ -63,31 +70,31 @@ This is the Mean Squared Error (MSE) of utilization relative to the target. Aver
 $$f_3 = \frac{N_{\text{unfittable}}}{N_{\text{total}}}$$
 
 Where:
-- $N\_{unfittable}$ = number of orders that could not be packed (detected via algorithm_BPS markers: `"No satisfied Box"` or `"Cannot find any satisfied Box in the given time"`)
-- $N\_{total}$ = total number of orders evaluated
+- $N_{\text{unfittable}}$ = number of orders that could not be packed (detected via algorithm_BPS markers: `"No satisfied Box"` or `"Cannot find any satisfied Box in the given time"`)
+- $N_{\text{total}}$ = total number of orders evaluated
 
-**Design rationale**: Unfittable orders are structurally expected — some orders have too many items (15–20) or volumes exceeding all boxes. These truly-unfittable orders represent a **natural constant** regardless of Collection. The remaining unfittable orders indicate Collection sparsity (the algorithm can't find a fit in time for that box configuration). A good Collection should bring $f\_3$ close to this natural baseline.
+**Design rationale**: Unfittable orders are structurally expected — some orders have too many items (15–20) or volumes exceeding all boxes. These truly-unfittable orders represent a **natural constant** regardless of Collection. The remaining unfittable orders indicate Collection sparsity (the algorithm can't find a fit in time for that box configuration). A good Collection should bring $f_3$ close to this natural baseline.
 
 ### 3.4 Combined Objective — Weighted Sum with Exponential Penalty
 
 $$F = w_1 \cdot \frac{f_1}{b_1} + w_2 \cdot \frac{f_2}{b_2} + w_3 \cdot g(f_3)$$
 
 Where:
-- $b\_1$, $b\_2$ = baseline values for normalization (from current/reference Collection)
-- $w\_1 = 0.6$, $w\_2 = 0.35$, $w\_3 = 0.05$ (sum = 1.0, prioritizing cost)
+- $b_1$, $b_2$ = baseline values for normalization (from current/reference Collection)
+- $w_1 = 0.6$, $w_2 = 0.35$, $w_3 = 0.05$ (sum = 1.0, prioritizing cost)
 
 **Exponential penalty function for f3:**
 
 $$g(f_3) = e^{k \cdot (f_3/b_3 - 1)} - 1$$
 
 Properties:
-- $f\_3 = b\_3 \Rightarrow g = 0$ (neutral — no penalty, no reward)
-- $f\_3 \gg b\_3 \Rightarrow$ exponential growth (harsh penalty for Collections producing many more unfittable orders)
-- $f\_3 \ll b\_3 \Rightarrow g \to -1$ (reward, bounded since $f\_3 \geq 0$)
-- Near $b\_3$: approximately linear $g \approx k \cdot (f\_3/b\_3 - 1)$ (mild)
+- $f_3 = b_3 \Rightarrow g = 0$ (neutral — no penalty, no reward)
+- $f_3 \gg b_3 \Rightarrow$ exponential growth (harsh penalty for Collections producing many more unfittable orders)
+- $f_3 \ll b_3 \Rightarrow g \to -1$ (reward, bounded since $f_3 \geq 0$)
+- Near $b_3$: approximately linear $g \approx k \cdot (f_3/b_3 - 1)$ (mild)
 - $k$ controls sensitivity (default: 3.0)
 
-**Why exponential instead of linear?** The natural constant of truly-unfittable orders means $b\_3$ represents a baseline. Collections near $b\_3$ are normal — only Collections significantly worse need harsh punishment. The exponential's asymmetric shape (unbounded penalty upward, bounded reward downward) matches this physical reality.
+**Why exponential instead of linear?** The natural constant of truly-unfittable orders means $b_3$ represents a baseline. Collections near $b_3$ are normal — only Collections significantly worse need harsh punishment. The exponential's asymmetric shape (unbounded penalty upward, bounded reward downward) matches this physical reality.
 
 ### 3.5 Per-Region Metrics
 
