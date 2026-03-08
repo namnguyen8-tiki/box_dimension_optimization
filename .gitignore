@@ -6,6 +6,7 @@ data/*
 # Exceptions — tracked CSV files
 !data/data_box_external.csv
 !data/data_box_tikicorp.csv
+!data/data_order_external_test.csv
 
 # macOS
 .DS_Store
