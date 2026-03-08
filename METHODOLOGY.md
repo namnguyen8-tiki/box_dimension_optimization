@@ -38,7 +38,7 @@ We define three objective functions. f1 and f2 are computed only over **fittable
 
 For each fittable order i assigned to a box:
 
-$$f_1 = \frac{1}{N_{fittable}} \sum_{i=1}^{N_{fittable}} \left( C_{box,i} + C_{bubble,i} \right)$$
+$$f_1 = \frac{1}{N_{\text{fittable}}} \sum_{i=1}^{N_{\text{fittable}}} \left( C_{\text{box},i} + C_{\text{bubble},i} \right)$$
 
 Where:
 - $C\_{box,i}$ = cost of the chosen box, proportional to its surface area: $2(lw + lh + wh) \times \text{unit\_cost}$
@@ -49,7 +49,7 @@ Where:
 
 ### 3.2 Objective Function 2 — Utilization Optimization
 
-$$f_2 = \frac{1}{N_{fittable}} \sum_{i=1}^{N_{fittable}} \left( \frac{V_{items,i}}{V_{box,i}} - u^* \right)^2$$
+$$f_2 = \frac{1}{N_{\text{fittable}}} \sum_{i=1}^{N_{\text{fittable}}} \left( \frac{V_{\text{items},i}}{V_{\text{box},i}} - u^* \right)^2$$
 
 Where:
 - $V\_{items,i}$ = total volume of items in order i (after adding reinforcement thickness)
@@ -60,7 +60,7 @@ This is the Mean Squared Error (MSE) of utilization relative to the target. Aver
 
 ### 3.3 Objective Function 3 — Unfittable Ratio
 
-$$f_3 = \frac{N_{unfittable}}{N_{total}}$$
+$$f_3 = \frac{N_{\text{unfittable}}}{N_{\text{total}}}$$
 
 Where:
 - $N\_{unfittable}$ = number of orders that could not be packed (detected via algorithm_BPS markers: `"No satisfied Box"` or `"Cannot find any satisfied Box in the given time"`)
@@ -109,9 +109,9 @@ This supports future region-based GA crossover (Section 6.3) and diagnostic anal
 
 Before packing evaluation, item dimensions are increased to account for protective wrapping:
 
-$$l' = l + 2 \times t_{reinforcement}$$
-$$w' = w + 2 \times t_{reinforcement}$$
-$$h' = h + 2 \times t_{reinforcement}$$
+$$l' = l + 2 \times t_{\text{reinforcement}}$$
+$$w' = w + 2 \times t_{\text{reinforcement}}$$
+$$h' = h + 2 \times t_{\text{reinforcement}}$$
 
 Default reinforcement thickness: 0.5 cm per side.
 
